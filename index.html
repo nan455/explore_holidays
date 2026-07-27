@@ -24,32 +24,145 @@ import { getFirestore, collection, doc,
 };
 
 let db = null;
+const STORAGE_PREFIX = 'explore-holidays:';
+
+function localStorageAvailable() {
+  try {
+    const key = '__explore_holidays_test__';
+    localStorage.setItem(key, '1');
+    localStorage.removeItem(key);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isPermissionError(error) {
+  const msg = error?.message || '';
+  return error?.code === 'permission-denied' || /permission|insufficient permissions/i.test(msg);
+}
+
+function readLocalCollection(col) {
+  if (!localStorageAvailable()) return [];
+  try {
+    const raw = localStorage.getItem(STORAGE_PREFIX + col);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return Object.entries(parsed).map(([id, value]) => ({ id, ...(value || {}) }));
+    }
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeLocalCollection(col, docs) {
+  if (!localStorageAvailable()) return;
+  try {
+    const payload = Array.isArray(docs)
+      ? Object.fromEntries(docs.map(d => [d.id, d]))
+      : {};
+    localStorage.setItem(STORAGE_PREFIX + col, JSON.stringify(payload));
+  } catch {}
+}
+
 try { const app = initializeApp(firebaseConfig); db = getFirestore(app); }
 catch(e) { console.warn('[Firebase] init failed — check config values:', e.message); }
 
 window._db       = db;
 window._fbReady  = !!db;
 window._fbSave   = async (col,id,data) => {
-  if(!db) throw new Error('Firebase not configured');
-  await setDoc(doc(db,col,id), {...data, _t: serverTimestamp()});
+  if(!db) {
+    if (localStorageAvailable()) {
+      const current = readLocalCollection(col);
+      const next = current.filter(item => item.id !== id);
+      next.push({ id, ...data });
+      writeLocalCollection(col, next);
+      return true;
+    }
+    throw new Error('Firebase not configured');
+  }
+  try {
+    await setDoc(doc(db,col,id), {...data, _t: serverTimestamp()});
+    return true;
+  } catch (error) {
+    if (isPermissionError(error) && localStorageAvailable()) {
+      const current = readLocalCollection(col);
+      const next = current.filter(item => item.id !== id);
+      next.push({ id, ...data });
+      writeLocalCollection(col, next);
+      return true;
+    }
+    throw error;
+  }
 };
 window._fbGet    = async (col,id) => {
-  if(!db) return null;
-  const s = await getDoc(doc(db,col,id));
-  return s.exists() ? s.data() : null;
+  if(!db) {
+    const docs = readLocalCollection(col);
+    return docs.find(item => item.id === id) || null;
+  }
+  try {
+    const s = await getDoc(doc(db,col,id));
+    return s.exists() ? s.data() : null;
+  } catch (error) {
+    if (isPermissionError(error)) return readLocalCollection(col).find(item => item.id === id) || null;
+    throw error;
+  }
 };
 window._fbGetAll = async (col) => {
-  if(!db) return [];
-  const s = await getDocs(collection(db,col));
-  return s.docs.map(d => ({id:d.id, ...d.data()}));
+  if(!db) return readLocalCollection(col);
+  try {
+    const s = await getDocs(collection(db,col));
+    const docs = s.docs.map(d => ({id:d.id, ...d.data()}));
+    if (docs.length) writeLocalCollection(col, docs);
+    return docs;
+  } catch (error) {
+    if (isPermissionError(error)) return readLocalCollection(col);
+    throw error;
+  }
 };
 window._fbAdd    = async (col,data) => {
-  if(!db) return null;
-  return await addDoc(collection(db,col), {...data, _t: serverTimestamp()});
+  if(!db) {
+    const id = `local_${Date.now()}`;
+    if (localStorageAvailable()) {
+      const current = readLocalCollection(col);
+      current.push({ id, ...data });
+      writeLocalCollection(col, current);
+    }
+    return { id };
+  }
+  try {
+    return await addDoc(collection(db,col), {...data, _t: serverTimestamp()});
+  } catch (error) {
+    if (isPermissionError(error) && localStorageAvailable()) {
+      const id = `local_${Date.now()}`;
+      const current = readLocalCollection(col);
+      current.push({ id, ...data });
+      writeLocalCollection(col, current);
+      return { id };
+    }
+    throw error;
+  }
 };
 window._fbDelete = async (col,id) => {
-  if(!db) return;
-  await deleteDoc(doc(db,col,id));
+  if(!db) {
+    if (localStorageAvailable()) {
+      const current = readLocalCollection(col).filter(item => item.id !== id);
+      writeLocalCollection(col, current);
+    }
+    return;
+  }
+  try {
+    await deleteDoc(doc(db,col,id));
+  } catch (error) {
+    if (isPermissionError(error) && localStorageAvailable()) {
+      const current = readLocalCollection(col).filter(item => item.id !== id);
+      writeLocalCollection(col, current);
+      return;
+    }
+    throw error;
+  }
 };
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -58,7 +171,6 @@ window._fbDelete = async (col,id) => {
    This is what makes admin changes survive Vercel refresh.
    ═══════════════════════════════════════════════════════════════════ */
 window._fbLoad = async () => {
-  if (!db) return;
   try {
 
     // ── PACKAGES ──────────────────────────────────────────────────
@@ -3014,7 +3126,9 @@ async function persistSection(section) {
     }
 
   } catch(e) {
-    console.warn('[persistSection]', section, e.message);
+    const msg = e?.message || '';
+    if (/permission|insufficient permissions/i.test(msg)) return;
+    console.warn('[persistSection]', section, msg);
   }
 }
 
