@@ -3126,9 +3126,11 @@ async function persistSection(section) {
     }
 
   } catch(e) {
-    const msg = e?.message || '';
-    if (/permission|insufficient permissions/i.test(msg)) return;
-    console.warn('[persistSection]', section, msg);
+    // Previously this error was swallowed here, so the UI always reported
+    // "success" even when the Firestore write never actually happened.
+    // Now we log AND rethrow so callers can show the real failure reason.
+    console.warn('[persistSection]', section, e?.message || e);
+    throw e;
   }
 }
 
@@ -3154,7 +3156,7 @@ async function persistAll() {
       setTimeout(() => {
         persistSection(sectionName)
           .then(() => showMsg(msgId, '✅ Saved to database — changes will persist after refresh!', 'success'))
-          .catch(e => console.warn(fnName, e.message));
+          .catch(e => showMsg(msgId, '❌ Database save FAILED (' + (e?.message||e) + ') — this change will NOT survive a refresh!', 'error'));
       }, 300);
     };
   }
@@ -3165,23 +3167,27 @@ async function persistAll() {
   wrap('saveAnniversary', 'anniversary',  'annMsg');
   wrap('saveContact',     'contact',      'contactMsg');
 
-  // Also wrap add/remove so deletions persist
-  ['addNewPackage','removePackage'].forEach(fn => {
-    const orig = window[fn]; if(!orig) return;
-    window[fn] = function(...args) { orig.apply(this,args); setTimeout(()=>persistSection('packages'), 400); };
-  });
-  ['addNewTemple','removeTemple'].forEach(fn => {
-    const orig = window[fn]; if(!orig) return;
-    window[fn] = function(...args) { orig.apply(this,args); setTimeout(()=>persistSection('temples'), 400); };
-  });
-  ['addNewVehicle','removeVehicle'].forEach(fn => {
-    const orig = window[fn]; if(!orig) return;
-    window[fn] = function(...args) { orig.apply(this,args); setTimeout(()=>persistSection('vehicles'), 400); };
-  });
-  ['addHoneymoonCard','deleteHoneymoonCard'].forEach(fn => {
-    const orig = window[fn]; if(!orig) return;
-    window[fn] = function(...args) { orig.apply(this,args); setTimeout(()=>persistSection('honeymoon'), 400); };
-  });
+  // Also wrap add/remove so deletions persist — and so a failed sync is
+  // actually shown to the admin instead of silently disappearing later.
+  function wrapAddRemove(fnName, sectionName, msgId) {
+    const orig = window[fnName]; if (!orig) return;
+    window[fnName] = function(...args) {
+      orig.apply(this, args);
+      setTimeout(() => {
+        persistSection(sectionName)
+          .then(() => showMsg(msgId, '✅ Synced to database — will survive a refresh.', 'success'))
+          .catch(e => showMsg(msgId, '❌ Database sync FAILED (' + (e?.message||e) + ') — this will disappear on refresh!', 'error'));
+      }, 400);
+    };
+  }
+  wrapAddRemove('addNewPackage',       'packages',   'addpkgMsg');
+  wrapAddRemove('removePackage',       'packages',   'pkgMsg');
+  wrapAddRemove('addNewTemple',        'temples',    'addtplMsg');
+  wrapAddRemove('removeTemple',        'temples',    'templeMsg');
+  wrapAddRemove('addNewVehicle',       'vehicles',   'vehMsg');
+  wrapAddRemove('removeVehicle',       'vehicles',   'vehMsg');
+  wrapAddRemove('addHoneymoonCard',    'honeymoon',  'honeyAddMsg');
+  wrapAddRemove('deleteHoneymoonCard', 'honeymoon',  'honeyMsg');
 })();
 
 // ══════════════════════════════════════════════════════════════════════
